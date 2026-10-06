@@ -257,14 +257,34 @@ class SimpleSQLReporter {
     }
 
     /**
-     * Process Download and Run Requests
+     * Process Download, Run Requests and Cron Activation
      */
     public function handle_action_requests() {
-        if ( isset($_GET['ssr_action']) && isset($_GET['post_id']) && current_user_can('manage_options') ) {
-            check_admin_referer('ssr_action_nonce');
-            
+        if ( ! isset($_GET['ssr_action']) || ! current_user_can('manage_options') ) {
+            return;
+        }
+
+        check_admin_referer('ssr_action_nonce');
+        $action = sanitize_text_field($_GET['ssr_action']);
+
+        if ( $action === 'activate_cron' ) {
+            $current_schedule = wp_get_schedule( 'ssr_hourly_event' );
+            if ( $current_schedule !== 'hourly' ) {
+                wp_clear_scheduled_hook( 'ssr_hourly_event' );
+                wp_schedule_event( time(), 'hourly', 'ssr_hourly_event' );
+            }
+
+            $redirect_url = add_query_arg([
+                'post_type'  => 'sql_report',
+                'ssr_notice' => 'cron_activated'
+            ], admin_url('edit.php'));
+
+            wp_redirect( $redirect_url );
+            exit;
+        }
+
+        if ( isset($_GET['post_id']) ) {
             $post_id = intval($_GET['post_id']);
-            $action = $_GET['ssr_action'];
 
             if ( $action === 'download' ) {
                 $post = get_post($post_id);
@@ -295,15 +315,43 @@ class SimpleSQLReporter {
     }
 
     /**
-     * Display Admin Notices after a manual run
+     * Display Admin Notices after a manual run or if cron is not registered
      */
     public function show_admin_notices() {
-        if ( isset($_GET['ssr_notice']) && isset($_GET['post_type']) && $_GET['post_type'] === 'sql_report' ) {
-            $status = $_GET['ssr_notice'];
-            $class = ($status === 'success') ? 'notice-success' : 'notice-error';
-            $message = ($status === 'success') ? 'Report successfully synced!' : 'Report sync failed. Check the status column for details.';
-            
-            printf('<div class="notice %1$s is-dismissible"><p>%2$s</p></div>', esc_attr($class), esc_html($message));
+        $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+        $is_sql_report = ( $screen && $screen->post_type === 'sql_report' )
+            || ( isset( $_GET['post_type'] ) && $_GET['post_type'] === 'sql_report' );
+
+        if ( ! $is_sql_report ) {
+            return;
+        }
+
+        if ( isset($_GET['ssr_notice']) ) {
+            $notice = sanitize_text_field($_GET['ssr_notice']);
+            if ( $notice === 'success' ) {
+                echo '<div class="notice notice-success is-dismissible"><p>Report successfully synced!</p></div>';
+            } elseif ( $notice === 'error' ) {
+                echo '<div class="notice notice-error is-dismissible"><p>Report sync failed. Check the status column for details.</p></div>';
+            } elseif ( $notice === 'cron_activated' ) {
+                echo '<div class="notice notice-success is-dismissible"><p>Der stündliche Cronjob wurde erfolgreich aktiviert!</p></div>';
+            }
+        }
+
+        // Warn if cron is not scheduled
+        if ( ! wp_next_scheduled( 'ssr_hourly_event' ) && current_user_can( 'manage_options' ) ) {
+            $activate_url = wp_nonce_url( admin_url( 'edit.php?post_type=sql_report&ssr_action=activate_cron' ), 'ssr_action_nonce' );
+            ?>
+            <div class="notice notice-warning">
+                <p style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+                    <span>
+                        <strong>Simple SQL Reporter:</strong> Der stündliche Cronjob (<code>ssr_hourly_event</code>) ist derzeit <strong>nicht aktiv</strong>. Automatische Synchronisationen finden nicht statt.
+                    </span>
+                    <a href="<?php echo esc_url( $activate_url ); ?>" class="button button-primary">
+                        Cronjob jetzt aktivieren
+                    </a>
+                </p>
+            </div>
+            <?php
         }
     }
 
@@ -520,9 +568,17 @@ public function render_meta_box( $post ) {
             );
         }
     }
-    public function add_cron_interval($schedules) { $schedules['ssr_hourly'] = ['interval'=>3600, 'display'=>'Hourly']; return $schedules; }
-    public function activate() { if (!wp_next_scheduled('ssr_hourly_event')) wp_schedule_event(time(), 'ssr_hourly', 'ssr_hourly_event'); }
-    public function deactivate() { wp_clear_scheduled_hook('ssr_hourly_event'); }
+    public function activate() {
+        $current_schedule = wp_get_schedule( 'ssr_hourly_event' );
+        if ( $current_schedule !== 'hourly' ) {
+            wp_clear_scheduled_hook( 'ssr_hourly_event' );
+            wp_schedule_event( time(), 'hourly', 'ssr_hourly_event' );
+        }
+    }
+
+    public function deactivate() {
+        wp_clear_scheduled_hook( 'ssr_hourly_event' );
+    }
 }
 
 new SimpleSQLReporter();
